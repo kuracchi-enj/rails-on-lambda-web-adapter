@@ -1,0 +1,35 @@
+# Dockerfile.lambda 用の .dockerignore (web / api で同一内容)。
+# ローカル開発用の docker/dev.Dockerfile 経由のビルド (bind mount 方式)では使われない。
+
+# 秘匿ファイル: master.key は git 管理外の実体がローカルに存在するため、
+# 誤ってビルドコンテキストへ含めないように明示的に除外する。
+# (SECRET_KEY_BASE は Lambda 実行時に環境変数/Secrets Manager から渡す運用)
+/config/master.key
+/config/credentials/*.key
+
+# ログ・一時ファイル
+/log/*
+!/log/.keep
+/tmp/*
+!/tmp/.keep
+
+# 事前生成されたアセット (ビルド時に assets:precompile し直すため不要)
+/public/assets
+
+# ローカル開発専用
+/.ruby-lsp
+/node_modules
+/vendor/bundle
+/.bundle
+/.git
+/.gitignore
+
+# エディタ・OS
+.DS_Store
+*.swp
+
+# テスト (Lambda ランタイムには不要)
+/test
+
+# ローカル用の CI 設定
+/config/ci.rb

@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.env.*
+
+# infra (CDK)
+infra/node_modules/
+infra/cdk.out/
+infra/cdk.context.json
+
+# build artifacts
+build/
+*.zip
+
+# bench raw data
+bench/results/raw/
+__pycache__/

@@ -1,0 +1,36 @@
+# config/database.yml (web / api で完全に同一の内容にする)
+#
+# 開発・テストも含めて全環境を ENV から組み立てることで、web と api が同一ファイル内容・
+# 同一 DB (development/test は同じ DB を共有、本番は DB_NAME) を参照できるようにしている。
+# migration の実行は api 側が担当する運用(MANIFEST.md の前提)。
+#
+# production の host/port/database/username/password は ENV から取得し、
+# sslmode(既定 verify-full) / sslrootcert(指定時のみ出力) にも対応する。
+
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  host: <%= ENV.fetch("DB_HOST", "localhost") %>
+  port: <%= ENV.fetch("DB_PORT", 5432) %>
+  username: <%= ENV["DB_USERNAME"] %>
+  password: <%= ENV["DB_PASSWORD"] %>
+
+development:
+  <<: *default
+  database: rlwa_development
+
+# Warning: The database defined as "test" will be erased and
+# re-generated from your development database when you run "rake".
+# Do not set this db to the same as development or production.
+test:
+  <<: *default
+  database: rlwa_test
+
+production:
+  <<: *default
+  database: <%= ENV.fetch("DB_NAME", "rlwa") %>
+  sslmode: <%= ENV.fetch("DB_SSLMODE", "verify-full") %>
+  <% if ENV["DB_SSLROOTCERT"] %>
+  sslrootcert: <%= ENV["DB_SSLROOTCERT"] %>
+  <% end %>

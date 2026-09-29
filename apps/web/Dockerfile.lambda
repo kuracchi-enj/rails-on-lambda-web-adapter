@@ -1,0 +1,140 @@
+# syntax=docker/dockerfile:1.7
+#
+# Lambda 用コンテナイメージ (Lambda Web Adapter 同梱)。web / api で完全に同一内容にする
+# (scripts/check-shared-code.sh で差分チェック対象)。
+#
+# コンテナ + SnapStart 版もこのイメージをそのまま使う。差異は Lambda 関数側の設定
+# (SnapStart の有効化) と環境変数 (AWS_LWA_SNAPSTART_BEFORE_CHECKPOINT_PATH /
+# AWS_LWA_SNAPSTART_AFTER_RESTORE_PATH。値は /_lwa/before_checkpoint, /_lwa/after_restore。
+# config/lambda_lifecycle.rb 参照) だけであり、この Dockerfile には持ち込まない。
+#
+# ベースイメージ: public.ecr.aws/lambda/ruby:3.4 (2026-09-24 確認: Amazon Linux 2023,
+# Ruby 3.4.11 aarch64, --enable-yjit でビルド済み, LD_LIBRARY_PATH に /var/task/lib を含む)。
+# zip 版 (マネージドランタイム ruby3.4) と Ruby/OS を揃えるため、build/runtime 両方で
+# 必ずこのイメージを使う。
+#
+# ビルド作業ディレクトリは実行時と同じ /var/task にする。bootsnap の load path cache は
+# 絶対パスをキーにするため、ビルド時と実行時でパスがずれるとキャッシュがヒットしない。
+
+ARG BASE_IMAGE=public.ecr.aws/lambda/ruby:3.4
+
+########################################
+# build stage
+########################################
+FROM ${BASE_IMAGE} AS build
+
+# msgpack (bootsnap の依存gem) など、Gemfile.lock に arm64 向け事前ビルド gem が無いものを
+# ソースからビルドするために必要。runtime イメージには持ち込まない。
+RUN dnf install -y gcc gcc-c++ make
+
+WORKDIR /var/task
+
+# --- bundler 設定 ---
+# deployment(=frozen) モードでインストールし、デプロイ後に Gemfile.lock を書き換えられない
+# ようにする。path は実行時にも読む /var/task 配下。development/test 用 gem は入れない。
+ENV BUNDLE_DEPLOYMENT="true" \
+    BUNDLE_PATH="/var/task/vendor/bundle" \
+    BUNDLE_WITHOUT="development:test" \
+    BUNDLE_JOBS="4"
+
+COPY Gemfile Gemfile.lock ./
+RUN bundle install
+
+COPY . .
+
+# --- bootsnap: ISeq/YAML の compile cache を事前生成する (--gemfile で依存 gem 分も含める)。
+#     BOOTSNAP_CACHE_DIR はこの build stage と runtime stage で必ず同じ値にする
+#     (bootsnap/setup の default_setup が実行時にこの値を見て同じキャッシュを再利用するため)。
+ENV BOOTSNAP_CACHE_DIR="/var/task/tmp/bootsnap-cache"
+RUN bundle exec bootsnap precompile --gemfile app/ config/ lib/
+
+# --- アセットは web のみ (api には app/assets が無い)。Dockerfile の内容を web/api で
+#     完全に同一に保つため、gem 名やアプリ名の分岐ではなくディレクトリ存在チェックで分岐する。
+#     SECRET_KEY_BASE_DUMMY=1 は Rails 標準の仕組み
+#     (railties-8.1.4 Rails::Application#secret_key_base のコメントに記載の
+#      "Dockerfile example: RUN SECRET_KEY_BASE_DUMMY=1 bundle exec rails assets:precompile"
+#      と同じ使い方)。本番の SECRET_KEY_BASE は Lambda 実行時に環境変数/Secrets Manager
+#      から渡すので、ここで生成される値はビルド時にしか使われない。
+RUN if [ -d app/assets ]; then \
+      SECRET_KEY_BASE_DUMMY=1 RAILS_ENV=production bin/rails assets:precompile; \
+    fi
+
+# --- RDS グローバル CA バンドル (Aurora sslmode=verify-full の証明書検証用) ---
+ADD https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /var/task/config/certs/rds-global-bundle.pem
+RUN chmod 0644 /var/task/config/certs/rds-global-bundle.pem
+
+# --- load path cache のウォームアップ ---
+# `bootsnap precompile` (上記) は ISeq/YAML の compile cache しか作らず、
+# require 解決用の load path cache (bootsnap/load_path_cache) はここでは温まらない
+# (lib/bootsnap/cli.rb の precompile_command は Bootsnap::CompileCache.setup しか
+#  呼んでおらず、Bootsnap::LoadPathCache には触れていないことをソースで確認済み)。
+# load path cache は `require "bootsnap/setup"` 経由でアプリを実際に起動したときに
+# 初めて構築されるため、ビルド時に一度起動してイメージに焼き込む。
+# BOOTSNAP_READONLY=false はこのステップだけ書き込みを許可するためのもの
+# (runtime stage では BOOTSNAP_READONLY=true を既定にする)。
+# DB には接続しない (DB_HOST を無効な値にしても失敗しないことを確認済み: ActiveRecord は
+# 遅延接続のため、環境変数の解決や eager_load だけでは DB へ接続しに行かない)。
+RUN BOOTSNAP_READONLY=false SECRET_KEY_BASE_DUMMY=1 RAILS_ENV=production \
+    DB_HOST=127.0.0.1 DB_SSLMODE=disable \
+    bin/rails runner 'puts "[build] warmup ok"'
+
+# --- 不要ファイルの削減 ---
+# gem のダウンロードキャッシュ (vendor/bundle/ruby/*/cache/*.gem) は bundle install 後は
+# require されないため安全に削除できる。
+#
+# 注意: 当初は「gem ディレクトリ名に test/spec を含むものを削除する」ワイルドカード
+# (`-iname "*-test-*"`) も入れていたが、rack-test gem (rack-test-2.2.0。actionpack が実行時に
+# require する正式なランタイム依存)まで削除してしまい起動エラーになることを
+# scripts/local-lambda-smoke.sh の実行で検出したため削除した。gem 単位でのテスト関連
+# ディレクトリの安全な判別が難しいため、ここでは gem のダウンロードキャッシュと
+# ビルド時の一時ファイルのみを削除する保守的な方針にする。
+RUN rm -rf vendor/bundle/ruby/*/cache \
+    ; rm -f tmp/local_secret.txt \
+    ; rm -rf log/* tmp/cache/* tmp/pids/* \
+    ; true
+
+########################################
+# LWA (Lambda Web Adapter) バイナリ取得用ステージ
+########################################
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.1.0 AS lambda-adapter
+
+########################################
+# runtime stage
+########################################
+FROM ${BASE_IMAGE} AS runtime
+
+# Lambda Extension として動作する LWA を配置する。Lambda 上では Extensions API 経由で
+# 自動的に起動される (アプリ側は関与しない)。Lambda 外 (ローカル docker run) では
+# Extension registration が失敗して即終了するだけで、ENTRYPOINT の puma には影響しない
+# ことを確認済み (scripts/local-lambda-smoke.sh で検証)。
+COPY --from=lambda-adapter /lambda-adapter /opt/extensions/lambda-adapter
+
+WORKDIR /var/task
+COPY --from=build /var/task /var/task
+
+# --- Lambda Web Adapter ---
+ENV PORT="8080" \
+    AWS_LWA_PORT="8080" \
+    AWS_LWA_READINESS_CHECK_PATH="/up"
+# SnapStart 用フックパス (AWS_LWA_SNAPSTART_BEFORE_CHECKPOINT_PATH /
+# AWS_LWA_SNAPSTART_AFTER_RESTORE_PATH) は、SnapStart を使う Lambda 関数側の設定として
+# 別途付与する (このイメージ自体は SnapStart 有無で共通)。値は
+# /_lwa/before_checkpoint, /_lwa/after_restore (config/routes.rb 参照)。
+
+# --- Rails / bundler ---
+ENV RAILS_ENV="production" \
+    BUNDLE_DEPLOYMENT="true" \
+    BUNDLE_PATH="/var/task/vendor/bundle" \
+    BUNDLE_WITHOUT="development:test"
+
+# --- bootsnap (実行時は読み取り専用の /var/task を前提に readonly にする) ---
+ENV BOOTSNAP_CACHE_DIR="/var/task/tmp/bootsnap-cache" \
+    BOOTSNAP_READONLY="true"
+
+# --- DB TLS (Aurora sslmode=verify-full 用の CA バンドル。ローカル検証では
+#     DB_SSLMODE=disable で上書きする) ---
+ENV DB_SSLROOTCERT="/var/task/config/certs/rds-global-bundle.pem"
+
+# Lambda 公式ベースイメージの既定 ENTRYPOINT (/lambda-entrypoint.sh) を上書きする。
+# run.sh が bundle exec puma -C config/puma.rb を実行する。
+ENTRYPOINT ["/var/task/run.sh"]

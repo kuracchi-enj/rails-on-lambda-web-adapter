@@ -1,0 +1,74 @@
+# ローカル動作確認用の docker compose 定義。
+# 必ず `docker compose -p rlwa ...` のようにプロジェクト名を明示して実行すること。
+# Lambda 用パッケージング(LWA同梱コンテナ)は別フェーズなので、ここでは開発用イメージのみを使う。
+name: rlwa
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "${RLWA_DB_PORT:-15432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    # docker/dev.Dockerfile はアプリコードを COPY せず volumes でマウントする汎用イメージなので
+    # web/api で共用できる。`docker build -f docker/dev.Dockerfile -t rlwa-dev:local .` で事前に
+    # ビルドしたイメージ名を参照する(`docker compose build` は環境によっては CLI プラグインの
+    # ディスパッチが不安定になることがあったため、明示ビルド + image 参照方式にしている)。
+    image: rlwa-dev:local
+    working_dir: /app
+    volumes:
+      - ./apps/web:/app
+      - web_bundle:/usr/local/bundle
+    environment:
+      RAILS_ENV: development
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      PORT: "3000"
+    ports:
+      - "${RLWA_WEB_PORT:-13000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    tty: true
+    stdin_open: true
+    command: ["sleep", "infinity"]
+
+  api:
+    image: rlwa-dev:local
+    working_dir: /app
+    volumes:
+      - ./apps/api:/app
+      - api_bundle:/usr/local/bundle
+    environment:
+      RAILS_ENV: development
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      PORT: "3000"
+    ports:
+      - "${RLWA_API_PORT:-13001}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    tty: true
+    stdin_open: true
+    command: ["sleep", "infinity"]
+
+volumes:
+  db_data:
+  web_bundle:
+  api_bundle:
