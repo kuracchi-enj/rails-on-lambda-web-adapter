@@ -288,12 +288,17 @@ python3 -B bench/aggregate.py
 
 ## 8. 撤去
 
-2026-09-28 時点で、AWS のリソース（Lambda 7 本、Aurora、VPC、シークレット、cdkd のブートストラップ用 S3・ECR）は残っている。撤去するときは `infra/` で次を実行する。
+2026-09-29 に撤去した。`infra/` で次の 2 つを実行した。
 
 ```bash
-AWS_REGION=ap-northeast-1 ./node_modules/.bin/cdkd destroy --all
+AWS_REGION=ap-northeast-1 ./node_modules/.bin/cdkd destroy --all --force
 ```
 
 ```bash
-AWS_REGION=ap-northeast-1 ./node_modules/.bin/cdkd bootstrap --destroy --include-state-bucket
+AWS_REGION=ap-northeast-1 ./node_modules/.bin/cdkd bootstrap --destroy --include-state-bucket --region ap-northeast-1 -y
 ```
+
+- 1 つ目で 2 スタックの 78 リソース（App 58、NetworkDb 20）を、2 つ目で cdkd の S3 バケット 2 つと ECR リポジトリを削除した。どちらもエラーはなかった。
+- シークレットは削除予定の期間を置かずに即時削除された。Aurora の日次の自動スナップショットと自動バックアップも、クラスタと一緒に消えた。
+- **Aurora の手動スナップショットが 1 件残った。** cdkd は Aurora クラスタを Cloud Control API 経由で削除しており、その削除処理が最終スナップショットを自動で作ったと考えられる（推測）。CDK 側で削除時の方針を「削除」にしていても作られた。手作業で削除した。
+- 撤去後、検証用のタグ（`Project=rails-lwa-verify`）が付いたリソースが 0 件であること、Lambda・ロググループ・IAM ロール・VPC・シークレット・S3・ECR が残っていないことを確認した。

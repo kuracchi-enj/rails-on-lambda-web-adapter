@@ -91,4 +91,6 @@ Rails 8（通常モード / API モード）を AWS Lambda Web Adapter で動か
 
 ### 7. まとめ・撤去
 - [x] レポート（`RESULT.md`）
-- [ ] `cdkd destroy`（要ユーザ確認）
+- [x] `cdkd destroy`（2026-09-29）: `cdkd destroy --all --force` で 78 リソース（App 58 / NetworkDb 20、エラー 0）、`cdkd bootstrap --destroy --include-state-bucket` で S3 2 つと ECR を削除
+  - Cloud Control 経由の Aurora クラスタ削除で最終スナップショット（手動）が 1 件自動作成されたため、手作業で削除
+  - 撤去後に `Project=rails-lwa-verify` のタグ付きリソース 0 件、Lambda / ロググループ / IAM ロール / VPC / シークレット（削除予定を含む）/ S3 / ECR が残っていないことを確認
